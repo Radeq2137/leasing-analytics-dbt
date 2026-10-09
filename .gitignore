@@ -1,0 +1,29 @@
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# dbt
+target/
+dbt_packages/
+logs/
+
+# DuckDB
+*.duckdb
+*.duckdb.wal
+
+# Secrets / local
+.env
+.aws/
+*.pem
+*credentials*
+
+# Claude Code – local settings
+.claude/settings.local.json
+
+# Editor / OS
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
