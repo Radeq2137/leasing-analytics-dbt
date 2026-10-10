@@ -21,6 +21,8 @@ This is a learning project, not production. Understanding every step matters mor
 - **Small steps.** One session = one closed step from the milestones below. At the end of a session, propose what's next.
 - **Let me write.** For SQL models, first describe what the model should do and let me try; give the full solution when I ask or get stuck. Config, boilerplate and infrastructure scripts can be written right away.
 - **Ask before running anything.** Before every terminal command (especially AWS, installs, git) first show what you want to run and why, and wait for my "ok". Without asking you may only read project files and edit files I asked for (using the file edit tools, not the shell). After running, show the output, including errors, and explain it.
+- **Pythonic code, written for a reviewer.** I review the code, so: PEP 8, type hints on every function, a docstring on every module/function/class (Google style: summary, `Args:`, `Returns:`, `Raises:`), small single-purpose functions, `logging` instead of `print`, no magic numbers (named constants). Explain non-obvious decisions in comments.
+- **Independent workflows.** Every step (each table in the generator, each dbt model branch, each CI job) must be able to run and fail on its own: one failure must not stop unrelated steps. Steps exchange data through S3 / files, not in-memory state; failures are logged and reported via exit code, and downstream steps work on the last good data.
 - **No secrets in the repo.** No AWS access keys, passwords or tokens in files. AWS access goes through the local AWS CLI config (`~/.aws/`, outside the repo) and DuckDB's `credential_chain`. `profiles.yml` lives outside the repo (`~/.dbt/`) or in the repo without sensitive data.
 - **No company data.** All data is generated. The structure may resemble real processes, but no real names, amounts, rules or customers.
 - **Ask before costs.** Before proposing anything that may generate AWS costs (new services, large volumes), ask.
@@ -87,12 +89,14 @@ sources:
 
 ## Data domain (fictional leasing)
 
+**The detailed, binding schema and data-quality rules live in [docs/02-data-contract.md](docs/02-data-contract.md)** (mandatory columns, `<unknown>` sentinel, `INCLUDE_IN_STATS` Y/N flag, rejected-rows quarantine, read raw as all-varchar). The table below is just an overview.
+
 Source tables, generated daily (incrementally). Names in English, snake_case:
 
 | table | description | key fields |
 |---|---|---|
 | customers | companies and individuals leasing assets | customer_id, customer_type (company/individual), industry, region, registration_date |
-| contracts | lease contracts | contract_id, customer_id, signed_date, asset_type (car/machinery/IT/...), net_value, term_months, down_payment_pct, status |
+| contracts | lease contracts (flat extract, includes customer & vendor attributes) | transaction_id, contract_id, customer_id, customer_type, customer_email, vendor_id, vendor_type, asset_type, asset_price, net_value, down_payment_pct, term_months, signed_date, delivery_* address, status, INCLUDE_IN_STATS (Y/N) |
 | installment_schedule | repayment plan per contract | contract_id, installment_no, due_date, installment_amount |
 | payments | actual payments received | payment_id, contract_id, payment_date, amount |
 
@@ -196,4 +200,6 @@ Update at the end of every session: what was done, what is in progress, next ste
 
 - **2026-10-09:** Wrote CLAUDE.md. Decisions: no EC2, everything local, catch-up generator, GitHub Actions later. Done: EC2 removed, root MFA, USD 0.01 budget with alerts, bucket in us-east-1.
 - **2026-10-10:** IAM user `leasing-dbt-local` + single-bucket policy, AWS CLI v2 configured (`aws configure`, default profile). Tests: get-caller-identity OK, ls/cp/rm on the bucket OK, `aws s3 ls` → AccessDenied (as intended). Repo connected to GitHub; README, .gitignore, CLAUDE.md, docs/ committed in English. 
-- **Session 3:** Branch `feature/python-dbt-setup`. Installed uv 0.13.0 (winget), Python 3.12.12, project `pyproject.toml` + `uv.lock`, `.venv/` with dbt-core 1.12.5 + dbt-duckdb 1.11.0 (duckdb 1.5.6). `uv run dbt --version` OK. **Stage 0 complete.** **Next step:** Stage 1 – minimal generator (contracts only) → S3 with `dt=` partitions (adds Faker + boto3 via `uv add`).
+- **Session 3:** Branch `feature/python-dbt-setup`. Installed uv 0.13.0 (winget), Python 3.12.12, project `pyproject.toml` + `uv.lock`, `.venv/` with dbt-core 1.12.5 + dbt-duckdb 1.11.0 (duckdb 1.5.6). `uv run dbt --version` OK. **Stage 0 complete.** PR #1 (`feature/python-dbt-setup`) opened. **Next step:** Stage 1 – minimal generator (contracts only) → S3 with `dt=` partitions (adds Faker + boto3 via `uv add`).
+- **GitHub Actions – on hold:** a CI workflow (`.github/workflows/ci.yml`: `uv sync --locked` + `uv run dbt --version`, on pull_request + workflow_dispatch) is merged to `main` (PR #2). Jobs don't start: the GitHub account is billing-locked by an old declined USD 10 payment (2024-02-19). A GitHub Support ticket was sent. Red/failed CI checks are expected until Support replies; then re-run. Still to do afterwards: OIDC provider + IAM role `github-actions-leasing-dbt` (trust: this repo, branch `main`), repo secrets `AWS_ROLE_ARN` + `S3_BUCKET`, `aws-smoke-test.yml`.
+- **Session 4:** Branch `feature/generator-contracts` (from `main` after PR #1 + PR #2). Added `faker` + `boto3`. First draft `generator/generate.py` (contracts only, never run) – **to be rewritten** to the new rules: Pythonic code with type hints + Google docstrings, independent per-table steps, full schema and dirty data from [docs/02-data-contract.md](docs/02-data-contract.md) (written this session; includes `INCLUDE_IN_STATS` Y/N, `<unknown>` sentinel, rejected-rows quarantine). `data/` added to `.gitignore`. **Next step:** rewrite the generator per the contract, run it locally, inspect the CSV, then `--upload` one day to S3.

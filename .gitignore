@@ -13,6 +13,9 @@ logs/
 *.duckdb
 *.duckdb.wal
 
+# Generated data (local copies of what goes to S3)
+data/
+
 # Secrets / local
 .env
 .aws/
