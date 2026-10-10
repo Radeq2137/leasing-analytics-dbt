@@ -1,122 +1,125 @@
-"""Synthetic leasing data generator – minimal version (contracts only).
+"""Command-line entry point of the synthetic leasing data generator.
 
-Generates lease contracts signed on a single day, writes them to a local CSV
-in a Hive-style partition (dt=YYYY-MM-DD) and optionally uploads it to S3.
+Every table is an independent step: a failure in one table is logged and
+reported via the exit code, but does not stop the other tables.
 
 Examples:
-    uv run python generator/generate.py --date 2026-10-10 --n-contracts 20 --seed 42
-    uv run python generator/generate.py --date 2026-10-10 --upload --bucket my-bucket
+    uv run python -m generator.generate --table contracts --date 2026-10-10
+    uv run python -m generator.generate --table all --upload --bucket my-bucket
 """
 
 import argparse
-import csv
-import random
+import logging
+import sys
+from collections import Counter
+from collections.abc import Callable
 from datetime import date
 from pathlib import Path
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-LOCAL_DATA_DIR = PROJECT_ROOT / "data"
+from generator import contracts
+from generator.schema import Row, TableSchema
+from generator.storage import partition_key, upload_to_s3, write_csv
 
-# asset_type -> (weight, min net value, max net value) in PLN
-ASSET_TYPES = {
-    "car": (50, 60_000, 250_000),
-    "truck": (10, 200_000, 600_000),
-    "machinery": (20, 100_000, 1_500_000),
-    "it_equipment": (15, 10_000, 150_000),
-    "medical_equipment": (5, 50_000, 800_000),
+LOCAL_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+DEFAULT_ROWS = 20
+DEFAULT_DIRTY_RATE = 0.1
+DEFAULT_SEED = 42
+
+Builder = Callable[[date, int, float, int], tuple[list[Row], Counter[str]]]
+"""Table builder: (day, n_rows, dirty_rate, seed) -> (raw rows, issue counts)."""
+
+TABLES: dict[str, tuple[TableSchema, Builder]] = {
+    "contracts": (contracts.SCHEMA, contracts.build_raw_rows),
 }
-TERM_MONTHS = [24, 36, 48, 60]
-DOWN_PAYMENT_PCT = [0, 10, 20, 30]
 
-CONTRACT_COLUMNS = [
-    "contract_id",
-    "customer_id",
-    "signed_date",
-    "asset_type",
-    "net_value",
-    "term_months",
-    "down_payment_pct",
-    "status",
-]
+logger = logging.getLogger("generator")
 
 
-def generate_contracts(day: date, n_contracts: int, rng: random.Random) -> list[dict]:
-    asset_names = list(ASSET_TYPES)
-    weights = [ASSET_TYPES[a][0] for a in asset_names]
+def run_table(table: str, args: argparse.Namespace) -> Path:
+    """Generate one table for one day, write it locally and optionally upload it.
 
-    contracts = []
-    for i in range(1, n_contracts + 1):
-        asset_type = rng.choices(asset_names, weights=weights)[0]
-        _, min_value, max_value = ASSET_TYPES[asset_type]
-        contracts.append(
-            {
-                # Unique without any state: date + sequence number within the day.
-                "contract_id": f"CT-{day:%Y%m%d}-{i:04d}",
-                # Placeholder until the customers table exists.
-                "customer_id": f"CU-{rng.randint(1, 500):05d}",
-                "signed_date": day.isoformat(),
-                "asset_type": asset_type,
-                "net_value": round(rng.uniform(min_value, max_value), 2),
-                "term_months": rng.choice(TERM_MONTHS),
-                "down_payment_pct": rng.choice(DOWN_PAYMENT_PCT),
-                "status": "active",
-            }
-        )
-    return contracts
+    Args:
+        table: Name of the table to generate (a key of ``TABLES``).
+        args: Parsed command-line arguments.
 
+    Returns:
+        Path of the written local file.
+    """
+    schema, build = TABLES[table]
+    rows, issues = build(args.date, args.rows, args.dirty_rate, args.seed)
 
-def partition_key(table: str, day: date) -> str:
-    return f"raw/{table}/dt={day.isoformat()}/{table}.csv"
-
-
-def write_csv(rows: list[dict], columns: list[str], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=columns)
-        writer.writeheader()
-        writer.writerows(rows)
-
-
-def upload_to_s3(path: Path, bucket: str, key: str) -> None:
-    import boto3  # imported here so local-only runs don't need AWS at all
-
-    # Credentials come from the default chain (~/.aws/credentials locally,
-    # OIDC role in GitHub Actions) – never from this code.
-    boto3.client("s3").upload_file(str(path), bucket, key)
-
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--date", type=date.fromisoformat, default=date.today(),
-                        help="business date to generate (YYYY-MM-DD), default: today")
-    parser.add_argument("--n-contracts", type=int, default=20,
-                        help="number of contracts signed that day (default: 20)")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="random seed for reproducible output (default: 42)")
-    parser.add_argument("--upload", action="store_true",
-                        help="upload the generated file to S3")
-    parser.add_argument("--bucket", help="target S3 bucket (required with --upload)")
-    args = parser.parse_args()
-    if args.upload and not args.bucket:
-        parser.error("--bucket is required with --upload")
-    return args
-
-
-def main() -> None:
-    args = parse_args()
-    # Seed per day, so each day is reproducible on its own.
-    rng = random.Random(args.seed * 100_000 + args.date.toordinal())
-
-    contracts = generate_contracts(args.date, args.n_contracts, rng)
-    key = partition_key("contracts", args.date)
+    key = partition_key(schema.name, args.date)
     local_path = LOCAL_DATA_DIR / key
-    write_csv(contracts, CONTRACT_COLUMNS, local_path)
-    print(f"Wrote {len(contracts)} contracts -> {local_path}")
+    write_csv(rows, schema.columns, local_path)
+    logger.info("%s: wrote %d rows -> %s", table, len(rows), local_path)
+    logger.info("%s: injected issues: %s", table, dict(sorted(issues.items())) or "none")
 
     if args.upload:
         upload_to_s3(local_path, args.bucket, key)
-        print(f"Uploaded -> s3://{args.bucket}/{key}")
+        logger.info("%s: uploaded -> s3://%s/%s", table, args.bucket, key)
+    return local_path
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse and validate command-line arguments.
+
+    Args:
+        argv: Arguments to parse; defaults to ``sys.argv[1:]``.
+
+    Returns:
+        The parsed arguments.
+    """
+    parser = argparse.ArgumentParser(description="Generate synthetic raw leasing data for one day.")
+    parser.add_argument("--table", choices=[*TABLES, "all"], default="all",
+                        help="table to generate (default: all)")
+    parser.add_argument("--date", type=date.fromisoformat, default=date.today(),
+                        help="business day, YYYY-MM-DD (default: today)")
+    parser.add_argument("--rows", type=int, default=DEFAULT_ROWS,
+                        help=f"rows per table per day (default: {DEFAULT_ROWS})")
+    parser.add_argument("--dirty-rate", type=float, default=DEFAULT_DIRTY_RATE,
+                        help=f"probability 0-1 that a row gets a data issue (default: {DEFAULT_DIRTY_RATE})")
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                        help=f"random seed for reproducible output (default: {DEFAULT_SEED})")
+    parser.add_argument("--upload", action="store_true", help="upload generated files to S3")
+    parser.add_argument("--bucket", help="target S3 bucket (required with --upload)")
+
+    args = parser.parse_args(argv)
+    if args.upload and not args.bucket:
+        parser.error("--bucket is required with --upload")
+    if args.rows < 0:
+        parser.error("--rows must be >= 0")
+    if not 0 <= args.dirty_rate <= 1:
+        parser.error("--dirty-rate must be between 0 and 1")
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Run the generator for the selected tables.
+
+    Args:
+        argv: Command-line arguments; defaults to ``sys.argv[1:]``.
+
+    Returns:
+        Exit code: 0 if every table succeeded, 1 if any table failed.
+    """
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    args = parse_args(argv)
+    tables = list(TABLES) if args.table == "all" else [args.table]
+
+    failed: list[str] = []
+    for table in tables:
+        try:
+            run_table(table, args)
+        except Exception:  # noqa: BLE001 – one table must never stop the others
+            logger.exception("%s: failed", table)
+            failed.append(table)
+
+    if failed:
+        logger.error("Failed tables: %s", ", ".join(failed))
+        return 1
+    logger.info("Done: %s", ", ".join(tables))
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
