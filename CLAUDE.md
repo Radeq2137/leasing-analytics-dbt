@@ -16,6 +16,7 @@ This is a learning project, not production. Understanding every step matters mor
 ## Working rules
 
 - **Language.** We talk in **Polish** in the Claude Code chat. **Everything that goes into the repo / GitHub is in English**: code, table and column names, comments, docs, README, CLAUDE.md, commit messages, PR descriptions.
+- **Welcome-back summary.** When I return after a break ("hej, wróciłem, co ostatnio zrobiliśmy i co dalej?"), first read the Status and Milestones sections and summarize in Polish: what was done last time, where we are in the milestones, what the next step is (and roughly how long it takes). Don't run anything before I confirm.
 - **Explain before doing.** For every new dbt concept (source, ref, materialization, test, macro, snapshot, incremental) briefly explain what it is and why. Where possible compare to Alteryx (e.g. model = container/workflow, `ref()` = connection between tools, test = Test/Filter tool with an alert).
 - **Small steps.** One session = one closed step from the milestones below. At the end of a session, propose what's next.
 - **Let me write.** For SQL models, first describe what the model should do and let me try; give the full solution when I ask or get stuck. Config, boilerplate and infrastructure scripts can be written right away.
@@ -32,7 +33,7 @@ This is a learning project, not production. Understanding every step matters mor
 - **GitHub:** https://github.com/Radeq2137/leasing-analytics-dbt (public, portfolio).
 - **Editor:** VS Code, locally.
 - **Stack:**
-  - Python 3.11+ in a virtual environment (uv)
+  - Python 3.12 in a project virtual environment managed by uv (`pyproject.toml` + `uv.lock`; run tools with `uv run ...`, e.g. `uv run dbt --version`). uv was installed with winget; its folder is on the user PATH, so a fresh shell finds `uv` (an older shell may need the full path under `%LOCALAPPDATA%\Microsoft\WinGet\Packages\astral-sh.uv_*`).
   - dbt-core + dbt-duckdb
   - DuckDB with httpfs and parquet extensions (reading from S3)
   - AWS CLI v2
@@ -151,7 +152,7 @@ Tick as you go (`[x]`).
 - [x] AWS: root MFA, budget alert, S3 bucket (us-east-1)
 - [x] AWS: IAM user with a single-bucket policy, access key, AWS CLI v2, tests pass
 - [x] GitHub repo, .gitignore, first commit
-- [ ] Python via uv, venv in the project (`.venv/`), install dbt-core + dbt-duckdb
+- [x] Python via uv, venv in the project (`.venv/`), install dbt-core + dbt-duckdb
 
 **Stage 1 – data in S3**
 - [ ] Minimal generator (contracts only) → S3 with `dt=` partitions
@@ -187,10 +188,12 @@ Tick as you go (`[x]`).
 - **2026-10-09:** Claude Code and everything else runs locally, no EC2.
 - **2026-10-09:** Generator in Python + Faker.
 - **2026-10-10:** Everything in the repo is in English, including table and column names (good for an international portfolio). Chat stays in Polish.
+- **2026-10-10:** Git workflow: one feature branch per session (`feature/<topic>`), pushed to GitHub and merged into `main` via a Pull Request. Commits keep the `Co-Authored-By: Claude` trailer.
 
 ## Status
 
 Update at the end of every session: what was done, what is in progress, next step.
 
 - **2026-10-09:** Wrote CLAUDE.md. Decisions: no EC2, everything local, catch-up generator, GitHub Actions later. Done: EC2 removed, root MFA, USD 0.01 budget with alerts, bucket in us-east-1.
-- **2026-10-10:** IAM user `leasing-dbt-local` + single-bucket policy, AWS CLI v2 configured (`aws configure`, default profile). Tests: get-caller-identity OK, ls/cp/rm on the bucket OK, `aws s3 ls` → AccessDenied (as intended). Repo connected to GitHub; README, .gitignore, CLAUDE.md, docs/ committed in English. **Next step:** Python via `uv`, venv in the project (`.venv/`), install dbt-core + dbt-duckdb.
+- **2026-10-10:** IAM user `leasing-dbt-local` + single-bucket policy, AWS CLI v2 configured (`aws configure`, default profile). Tests: get-caller-identity OK, ls/cp/rm on the bucket OK, `aws s3 ls` → AccessDenied (as intended). Repo connected to GitHub; README, .gitignore, CLAUDE.md, docs/ committed in English. 
+- **Session 3:** Branch `feature/python-dbt-setup`. Installed uv 0.13.0 (winget), Python 3.12.12, project `pyproject.toml` + `uv.lock`, `.venv/` with dbt-core 1.12.5 + dbt-duckdb 1.11.0 (duckdb 1.5.6). `uv run dbt --version` OK. **Stage 0 complete.** **Next step:** Stage 1 – minimal generator (contracts only) → S3 with `dt=` partitions (adds Faker + boto3 via `uv add`).
