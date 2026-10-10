@@ -8,3 +8,13 @@ dependencies = [
     "dbt-duckdb>=1.11.0",
     "faker>=40.43.0",
 ]
+
+[tool.pytest.ini_options]
+# Lets tests import the `generator` package from the project root.
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]

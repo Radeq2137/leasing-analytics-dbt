@@ -16,6 +16,9 @@ logs/
 # Generated data (local copies of what goes to S3)
 data/
 
+# Personal Python practice (local only)
+learning/
+
 # Secrets / local
 .env
 .aws/
