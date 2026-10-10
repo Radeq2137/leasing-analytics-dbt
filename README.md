@@ -46,7 +46,7 @@ Python · Faker · AWS S3 · AWS CLI · dbt-core · dbt-duckdb · DuckDB · Git 
 ## Progress
 
 - [x] **Stage 0** – AWS: S3 bucket, IAM user (least privilege), AWS CLI, GitHub repo
-- [ ] **Stage 0** – Python (uv), dbt-core + dbt-duckdb
+- [x] **Stage 0** – Python 3.12 (uv), dbt-core + dbt-duckdb
 - [ ] **Stage 1** – data generator → S3
 - [ ] **Stage 2** – dbt basics: sources, staging, generic tests, docs
 - [ ] **Stage 3** – business logic: intermediate, marts, singular tests
