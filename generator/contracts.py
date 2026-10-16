@@ -6,20 +6,22 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
-from functools import lru_cache
 from typing import NamedTuple
 
 from faker import Faker
 
+from generator.customers import CustomerProfile, customer_profile, registered_count
 from generator.dirty import IssueFn, inject_dirty_data, parse_decimal
+from generator.reference import pick_region_and_city
 from generator.schema import Row, TableSchema
 
 FAKER_LOCALE = "pl_PL"
 CENT = Decimal("0.01")
 VAT_RATE = Decimal("0.23")
 
-N_CUSTOMERS = 500
 N_VENDORS = 50
+# Customer numbers that never register (the customer base stays far below), used for orphan contracts.
+ORPHAN_CUSTOMER_NOS = (90_000, 99_999)
 STATUS_ON_SIGNING = "active"
 INCLUDE_IN_STATS_YES_SHARE = 0.85
 # Share of optional fields that are legitimately left blank in clean data.
@@ -43,11 +45,11 @@ ASSET_TYPES: dict[str, AssetType] = {
     "it_equipment": AssetType(15, 10_000, 150_000),
     "medical_equipment": AssetType(5, 50_000, 800_000),
 }
-CUSTOMER_TYPE_WEIGHTS: dict[str, int] = {"company": 60, "sole_trader": 30, "individual": 10}
 VENDOR_TYPES = ("dealer", "manufacturer", "broker")
 TERM_MONTHS = (12, 24, 36, 48, 60, 72, 84)
 DOWN_PAYMENT_PCT = (0, 5, 10, 15, 20, 30)
-EMAIL_DOMAINS = ("example.com", "example.pl")
+# The seed dbt/seeds/ref_city_region.csv is the source of truth for regions and cities; this list is only
+# kept so that a test can check that the two stay in sync.
 VOIVODESHIPS = (
     "dolnośląskie", "kujawsko-pomorskie", "lubelskie", "lubuskie",
     "łódzkie", "małopolskie", "mazowieckie", "opolskie",
@@ -78,15 +80,6 @@ SCHEMA = TableSchema(
     business_key="contract_id",
     row_id="transaction_id",
 )
-
-
-@dataclass(frozen=True)
-class CustomerProfile:
-    """Attributes that stay the same for a customer across all their contracts."""
-
-    customer_id: str
-    customer_type: str
-    customer_email: str
 
 
 @dataclass(frozen=True)
@@ -140,30 +133,6 @@ class Contract:
         }
 
 
-@lru_cache(maxsize=N_CUSTOMERS)
-def customer_profile(customer_no: int) -> CustomerProfile:
-    """Build the stable profile of a customer.
-
-    The profile is seeded by the customer number only, so the same customer
-    always has the same type and e-mail, no matter which day is generated.
-
-    Args:
-        customer_no: Customer number, 1..N_CUSTOMERS.
-
-    Returns:
-        The customer's profile.
-    """
-    rng = random.Random(customer_no)
-    fake = Faker(FAKER_LOCALE)
-    fake.seed_instance(customer_no)
-    customer_type = rng.choices(list(CUSTOMER_TYPE_WEIGHTS), weights=list(CUSTOMER_TYPE_WEIGHTS.values()))[0]
-    return CustomerProfile(
-        customer_id=f"CU-{customer_no:05d}",
-        customer_type=customer_type,
-        customer_email=f"{fake.user_name()}@{rng.choice(EMAIL_DOMAINS)}",
-    )
-
-
 def _money(value: Decimal) -> Decimal:
     """Round an amount to cents (half up, as in accounting)."""
     return value.quantize(CENT, rounding=ROUND_HALF_UP)
@@ -194,10 +163,13 @@ def generate_contract(day: date, sequence_no: int, rng: random.Random, fake: Fak
     net_value = _money(asset_price / (1 + VAT_RATE) * (1 - down_payment_pct / 100))
 
     vendor_no = rng.randint(1, N_VENDORS)
+    # A consistent pair from the seed: the city really lies in the region.
+    delivery_region, delivery_city = pick_region_and_city(rng)
     return Contract(
         transaction_id=uuid.UUID(int=rng.getrandbits(128), version=4),
         contract_id=f"CT-{day:%Y%m%d}-{sequence_no:04d}",
-        customer=customer_profile(rng.randint(1, N_CUSTOMERS)),
+        # Only customers already registered on the signing day (data contract, section 4).
+        customer=customer_profile(rng.randint(1, registered_count(day))),
         vendor_id=f"VN-{vendor_no:04d}",
         # Derived from the vendor number, so a vendor always has the same type.
         vendor_type=VENDOR_TYPES[vendor_no % len(VENDOR_TYPES)],
@@ -208,9 +180,9 @@ def generate_contract(day: date, sequence_no: int, rng: random.Random, fake: Fak
         term_months=rng.choice(TERM_MONTHS),
         signed_date=day,
         delivery_street=_optional(fake.street_address(), rng),
-        delivery_city=_optional(fake.city(), rng),
+        delivery_city=_optional(delivery_city, rng),
         delivery_postal_code=_optional(fake.postcode(), rng),
-        delivery_region=_optional(rng.choice(VOIVODESHIPS), rng),
+        delivery_region=_optional(delivery_region, rng),
         status=STATUS_ON_SIGNING,
         include_in_stats=rng.random() < INCLUDE_IN_STATS_YES_SHARE,
     )
@@ -225,7 +197,18 @@ def net_value_above_price(row: Row, schema: TableSchema, rng: random.Random, day
     return True
 
 
-CONTRACT_ISSUES: dict[str, IssueFn] = {"net_value_above_price": net_value_above_price}
+def orphan_customer_id(row: Row, schema: TableSchema, rng: random.Random, day: date) -> bool:
+    """Point the contract at a customer that does not exist (caught by the dbt ``relationships`` test)."""
+    if not row.get("customer_id", "").strip():
+        return False
+    row["customer_id"] = f"CU-{rng.randint(*ORPHAN_CUSTOMER_NOS):05d}"
+    return True
+
+
+CONTRACT_ISSUES: dict[str, IssueFn] = {
+    "net_value_above_price": net_value_above_price,
+    "orphan_customer_id": orphan_customer_id,
+}
 
 
 def build_raw_rows(day: date, n_rows: int, dirty_rate: float, seed: int) -> tuple[list[Row], Counter[str]]:
@@ -239,13 +222,16 @@ def build_raw_rows(day: date, n_rows: int, dirty_rate: float, seed: int) -> tupl
             day is reproducible on its own.
 
     Returns:
-        Raw rows (all values as text) and a count of injected issues by name.
+        Raw rows (all values as text) and a count of injected issues by name. No rows before the
+        go-live day: nobody is registered yet, so nobody can sign a contract.
 
     Raises:
         ValueError: If ``n_rows`` is negative or ``dirty_rate`` is outside 0-1.
     """
     if n_rows < 0:
         raise ValueError(f"n_rows must be >= 0, got {n_rows}")
+    if registered_count(day) < 1:
+        return [], Counter()
 
     rng = random.Random(f"{seed}-{SCHEMA.name}-{day.isoformat()}")
     fake = Faker(FAKER_LOCALE)
