@@ -1,0 +1,23 @@
+name: leasing
+version: "1.0.0"
+config-version: 2
+
+# Which connection from profiles.yml this project uses.
+profile: leasing
+
+# Where dbt looks for each kind of file (all relative to this folder).
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+seed-paths: ["seeds"]
+snapshot-paths: ["snapshots"]
+
+# Folders removed by `dbt clean`.
+clean-targets: ["target", "dbt_packages"]
+
+# Default settings per model folder. A "+" prefix means "this is a config, not a sub-folder".
+# Folders are added here as we create them (intermediate, marts come in Stage 3).
+models:
+  leasing:
+    staging:
+      +materialized: view

@@ -1,0 +1,18 @@
+# Connection profile. No secrets here: AWS credentials are read from the default
+# AWS credential chain (~/.aws/credentials locally, an OIDC role in GitHub Actions).
+leasing:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      # Local database file; created on first run, git-ignored (*.duckdb).
+      path: leasing.duckdb
+      # DuckDB extensions: httpfs = read files from S3, parquet = parquet files.
+      extensions:
+        - httpfs
+        - parquet
+      # DuckDB "secret": how DuckDB logs in to S3.
+      secrets:
+        - type: s3
+          provider: credential_chain
+          region: us-east-1

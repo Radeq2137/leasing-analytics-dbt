@@ -1,0 +1,89 @@
+version: 2
+
+models:
+  - name: stg_contracts
+    description: Cleaned contracts, one row per raw row (not yet split into valid / rejected).
+    columns:
+      # ── identifiers ──────────────────────────────────────────────────────────
+      - name: transaction_id
+        description: UUID of the row in the source extract.
+        data_tests:
+          - not_null
+          - unique
+
+      - name: contract_id
+        description: Business key, format CT-YYYYMMDD-NNNN.
+        data_tests:
+          - unique
+          - not_null
+
+      - name: customer_id
+        description: Customer key, format CU-NNNNN.
+        data_tests:
+          - not_null
+
+      - name: vendor_id
+        description: Vendor key, format VN-NNNN.
+        data_tests:
+          - not_null
+
+      # ── categories ("unknown" is a valid value, a blank is not) ──────────────
+      - name: customer_type
+        description: company, sole_trader or individual; unknown when the source said <unknown>.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [company, sole_trader, individual, unknown]
+
+      - name: vendor_type
+        description: dealer, manufacturer or broker; unknown when the source said <unknown>.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [dealer, manufacturer, broker, unknown]
+
+      - name: asset_type
+        description: Type of the leased asset; unknown when the source said <unknown>.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [car, truck, machinery, it_equipment, medical_equipment, unknown]
+
+      - name: status
+        description: Contract status; unknown when the source said <unknown>.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: [active, closed, collections, terminated, unknown]
+
+      # ── mandatory numbers and dates (NULL here = the raw value was not parsable) ──
+      - name: asset_price
+        description: Gross price of the asset, PLN.
+        data_tests:
+          - not_null
+
+      - name: net_value
+        description: Financed net amount, PLN.
+        data_tests:
+          - not_null
+
+      - name: term_months
+        description: Contract term in months.
+        data_tests:
+          - not_null
+
+      - name: signed_date
+        description: Date the contract was signed.
+        data_tests:
+          - not_null
+
+      # ── flag: no test on purpose, see the note below ─────────────────────────
+      # include_in_stats is NULL both for the valid "<unknown>" and for invalid values,
+      # so a not_null test here would flag valid rows too. The valid / rejected split
+      # (next step) will tell them apart using the raw value.
+      - name: include_in_stats
+        description: true for Y, false for N, NULL for anything else (see the note in this file).
