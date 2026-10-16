@@ -106,7 +106,7 @@ rows (incremental model, Stage 4).
 | `customer_name` | text | ✅ | free text | company name or full name (synthetic, Faker) |
 | `industry` | text | ✅ | `transport`, `construction`, `manufacturing`, `retail`, `healthcare`, `it_services`, `agriculture`, `private` | case-insensitive in raw; `private` for individuals |
 | `region` | text | ✅ | Polish voivodeship name | same list as `contracts.delivery_region` |
-| `city` | text | ❌ | | |
+| `city` | text | ❌ | a city listed for `region` in `ref_city_region` | not belonging to `region` → flagged (`city_region_mismatch`) |
 | `customer_email` | text | ❌ | valid e-mail format | same value as in `contracts`; invalid format → warn |
 | `registration_date` | date | ✅ | `YYYY-MM-DD`, ≤ `dt` | later than `dt` → rejected |
 
@@ -124,18 +124,51 @@ Row-level rules follow the general rules of section 1 (blank mandatory → rejec
 | duplicate `customer_id` | same id twice | quarantine `duplicate_customer_id`, test `unique` → `error` |
 | future `registration_date` | `registration_date > dt` | rejected, test `error` |
 | **duplicate e-mail** across different customers | two `customer_id`s with the same `customer_email` | **flagged, not rejected** (see below) |
+| **city not in region** | `city = Gdańsk`, `region = lubelskie` | **flagged, not rejected** (`city_region_mismatch`, see below) |
 
-### Duplicate e-mails (possible duplicate customers)
+### Review flags, resolution and the customer dimension
 
-The same e-mail under two different `customer_id`s often means one customer registered twice, but a shared company
-mailbox is also possible, so the row is **kept**. Because the second customer may register on a later day, this can
-only be detected on the **combined table of all days** (`stg_customers`), never in a single daily file.
+Some problems cannot be settled by a rule: the pipeline detects them, a human decides. Such rows are **kept**
+(never dropped), **flagged**, and kept out of the final product until they are resolved.
 
-- Staging adds a boolean column `has_duplicate_email` (true when the same non-blank e-mail, compared case-insensitively
-  and trimmed, belongs to more than one `customer_id`). Blank e-mails never count as duplicates.
-- A dbt test on `customer_email` (`unique` over non-null values, severity `warn`) reports how many there are.
-- Business decides later what to do with the flagged rows (e.g. merge in a customer dimension); the pipeline never drops them.
-- The generator injects the issue by giving a small share of new customers the e-mail of an already registered one.
+**Detected in `stg_customers`** (the combined table of all days):
+
+| column | meaning |
+|---|---|
+| `has_duplicate_email` | the same non-blank e-mail (trimmed, case-insensitive) belongs to more than one `customer_id`. Possible duplicate customer, but a shared company mailbox is also possible. It can only be seen on the combined table: the second customer may register on a later day |
+| `city_region_mismatch` | `city` is not listed for `region` in `ref_city_region`. A blank city or region never counts as a mismatch |
+| `needs_review` | true when any flag above is true |
+| `review_reason` | the flags that fired, comma-separated (`duplicate_email`, `city_region_mismatch`) |
+
+A dbt test on `customer_email` (`unique` over non-null values, severity `warn`) reports how many duplicates there are.
+
+**Resolution by a human.** Decisions live in a small reference table `customer_review_decisions` (dbt seed, a CSV in
+the repo): `customer_id`, `decision`, `merge_target_id`, `decided_by`, `decided_at`. Allowed decisions: `keep` (checked,
+the row is fine), `merge_into` (duplicate of `merge_target_id`), `exclude`. The pipeline reads it on every run, so a
+decision survives data refreshes and leaves an audit trail.
+
+**Where the rows go** (models are built in Stage 3):
+
+- `customers_to_review`: rows with `needs_review` and no decision yet = the work list of the data steward.
+- `dim_customer` (feeds Power BI): only clean rows and rows resolved with `keep`; a `merge_into` row is folded into
+  its target; `exclude` rows and unresolved rows are not in the dimension. BI gets clean data by default. The flag
+  columns stay in the dimension as a second safety net (a report may still filter on `needs_review = false`).
+
+**Merging (golden record).** A duplicate is merged into its target only to **fill columns that are empty** in the
+target (`coalesce`); an existing value is never overwritten. A value taken over is accepted only if it passes validation
+(e.g. the city belongs to the region according to `ref_city_region`); otherwise it stays empty and the customer stays flagged.
+
+### Reference data: `ref_city_region`
+
+A small lookup (dbt seed in `dbt/seeds/`, also read by the generator): `city`, `region` – a few cities for each of
+the 16 voivodeships. It is the single source of truth for both sides: the generator draws **consistent** city/region
+pairs (for customers and for `contracts.delivery_*`), and dbt validates against the same file.
+
+Known issue this fixes: the current `contracts` generator draws `delivery_city` (Faker) and `delivery_region`
+independently, so even "clean" rows can have a city outside its region.
+
+The generator injects, in small shares: customers whose city does not belong to the region, and new customers that
+reuse the e-mail of an already registered customer.
 
 ---
 
