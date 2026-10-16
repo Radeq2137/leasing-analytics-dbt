@@ -17,8 +17,9 @@ from datetime import date
 from pathlib import Path
 
 from generator import contracts
+from generator.days import missing_days
 from generator.schema import Row, TableSchema
-from generator.storage import partition_key, upload_to_s3, write_csv
+from generator.storage import list_existing_days, partition_key, upload_to_s3, write_csv
 
 LOCAL_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DEFAULT_ROWS = 20
@@ -35,30 +36,72 @@ TABLES: dict[str, tuple[TableSchema, Builder]] = {
 logger = logging.getLogger("generator")
 
 
-def run_table(table: str, args: argparse.Namespace) -> Path:
+def days_to_generate(table: str, args: argparse.Namespace) -> list[date]:
+    """Decide which business days to generate for one table.
+
+    Args:
+        table: Table name (a key of ``TABLES``).
+        args: Parsed command-line arguments.
+
+    Returns:
+        With ``--catch-up``: the days missing in S3 (see ``missing_days``).
+        Otherwise just ``--date``.
+    """
+    if not args.catch_up:
+        return [args.date]
+    existing = list_existing_days(args.bucket, table)
+    return missing_days(existing, today=date.today(), backfill_days=args.backfill)
+
+
+def run_table_day(table: str, day: date, args: argparse.Namespace) -> Path:
     """Generate one table for one day, write it locally and optionally upload it.
 
     Args:
         table: Name of the table to generate (a key of ``TABLES``).
+        day: Business day to generate.
         args: Parsed command-line arguments.
 
     Returns:
         Path of the written local file.
     """
     schema, build = TABLES[table]
-    rows, issues = build(args.date, args.rows, args.dirty_rate, args.seed)
+    seed = args.seed + day.toordinal()  # different per day, still reproducible
+    rows, issues = build(day, args.rows, args.dirty_rate, seed)
 
-    key = partition_key(schema.name, args.date)
+    key = partition_key(schema.name, day)
     local_path = LOCAL_DATA_DIR / key
     write_csv(rows, schema.columns, local_path)
-    logger.info("%s: wrote %d rows -> %s", table, len(rows), local_path)
-    logger.info("%s: injected issues: %s", table, dict(sorted(issues.items())) or "none")
+    logger.info("%s %s: wrote %d rows -> %s", table, day, len(rows), local_path)
+    logger.info("%s %s: injected issues: %s", table, day, dict(sorted(issues.items())) or "none")
 
     if args.upload:
         upload_to_s3(local_path, args.bucket, key)
-        logger.info("%s: uploaded -> s3://%s/%s", table, args.bucket, key)
+        logger.info("%s %s: uploaded -> s3://%s/%s", table, day, args.bucket, key)
     return local_path
 
+
+def run_table(table: str, args: argparse.Namespace) -> None:
+    """Generate every planned day of one table, oldest first.
+
+    A failing day stops this table (the error goes up to ``main``):
+    ``missing_days()`` continues after the latest day in S3, so a skipped
+    day would never be filled in later.
+
+    Args:
+        table: Name of the table to generate (a key of ``TABLES``).
+        args: Parsed command-line arguments.
+    """
+    days = days_to_generate(table, args)
+    if not days:
+        logger.info("%s: up to date, nothing to do", table)
+        return
+
+    logger.info("%s: %d day(s) to generate: %s .. %s", table, len(days), days[0], days[-1])
+    if args.dry_run:
+        return
+
+    for day in days:
+        run_table_day(table, day, args)
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """Parse and validate command-line arguments.
@@ -72,8 +115,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate synthetic raw leasing data for one day.")
     parser.add_argument("--table", choices=[*TABLES, "all"], default="all",
                         help="table to generate (default: all)")
-    parser.add_argument("--date", type=date.fromisoformat, default=date.today(),
-                        help="business day, YYYY-MM-DD (default: today)")
+    
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--date", type=date.fromisoformat, default=date.today(),
+                      help="business day, YYYY-MM-DD (default: today)")
+    mode.add_argument("--catch-up", action="store_true",
+                      help="generate every day missing in S3, up to today (needs --upload)")
+    parser.add_argument("--backfill", type=int, metavar="N",
+                        help="with --catch-up and no data yet: generate the last N days")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="only print which days would be generated")
+    
     parser.add_argument("--rows", type=int, default=DEFAULT_ROWS,
                         help=f"rows per table per day (default: {DEFAULT_ROWS})")
     parser.add_argument("--dirty-rate", type=float, default=DEFAULT_DIRTY_RATE,
@@ -84,6 +136,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--bucket", help="target S3 bucket (required with --upload)")
 
     args = parser.parse_args(argv)
+    if args.catch_up and not args.upload:
+        parser.error("--catch-up needs --upload (existing days are read from S3)")
+    if args.backfill is not None and not args.catch_up:
+        parser.error("--backfill only works together with --catch-up")
+    if args.backfill is not None and args.backfill < 1:
+        parser.error("--backfill must be >= 1")
     if args.upload and not args.bucket:
         parser.error("--bucket is required with --upload")
     if args.rows < 0:

@@ -164,12 +164,14 @@ Tick as you go (`[x]`).
 
 **Stage 1 – data in S3**
 - [x] Minimal generator (contracts only) → S3 with `dt=` partitions (PR #3)
-- [ ] Extend to customers, installment_schedule, payments with consistent relations
-- [~] Dirty data ✅ (catalog per data contract) + `--backfill` ⬜ + catch-up mode ⬜ (+ optionally Windows Task Scheduler)
+- [x] Dirty data (catalog per data contract)
+- [x] `missing_days()` – pure function choosing which days to generate (PR #4)
+- [x] `--backfill N` + `--catch-up` + `--dry-run` wired into the generator (S3 partition listing); 90 days of `contracts` in S3 (2026-07-19 .. 2026-10-16) (optionally: Windows Task Scheduler)
+- [ ] Extend to customers, installment_schedule, payments with consistent relations – **after the first dbt pass on `contracts`** (see Decisions, 2026-10-16)
 
 **Stage 2 – dbt basics**
 - [ ] `dbt init`, `dbt debug` passes, DuckDB reads from S3
-- [ ] Sources + staging models for all tables
+- [ ] Source + staging model for `contracts` first; then one staging model for each new table as it is added
 - [ ] Generic tests: unique, not_null, relationships, accepted_values
 - [ ] `dbt docs generate` + review the lineage graph
 
@@ -197,6 +199,7 @@ Tick as you go (`[x]`).
 - **2026-10-09:** Generator in Python + Faker.
 - **2026-10-10:** Everything in the repo is in English, including table and column names (good for an international portfolio). Chat stays in Polish.
 - **2026-10-10:** Git workflow: one feature branch per session (`feature/<topic>`), pushed to GitHub and merged into `main` via a Pull Request. Commits keep the `Co-Authored-By: Claude` trailer.
+- **2026-10-16:** Order of work: dbt starts early. After `--backfill` / catch-up for `contracts`, do Stage 2 on `contracts` alone, then add the other tables one by one (generator table + its staging model + tests together). Reason: the "source → model → test" loop is the core data-engineering skill and should be practised early, not after weeks of generator work.
 
 ## Status
 
@@ -209,3 +212,4 @@ Update at the end of every session: what was done, what is in progress, next ste
 - **Session 4:** Branch `feature/generator-contracts` (from `main` after PR #1 + PR #2). Added `faker` + `boto3`. First draft `generator/generate.py` (contracts only, never run) – **to be rewritten** to the new rules: Pythonic code with type hints + Google docstrings, independent per-table steps, full schema and dirty data from [docs/02-data-contract.md](docs/02-data-contract.md) (written this session; includes `INCLUDE_IN_STATS` Y/N, `<unknown>` sentinel, rejected-rows quarantine). `data/` added to `.gitignore`. **Next step:** rewrite the generator per the contract, run it locally, inspect the CSV, then `--upload` one day to S3.
 - **Session 5:** Generator rewritten as a package per the contract: `generator/schema.py` (`TableSchema`), `contracts.py` (typed `Contract` dataclass, stable customer profiles, Decimal amounts), `dirty.py` (generic issue catalog, 1–3 issues per dirty row, duplicates), `storage.py` (CSV + S3), `generate.py` (CLI, each table isolated in try/except, exit code 0/1). Run: `uv run python -m generator.generate --table contracts --date 2026-10-10 --rows 20 --dirty-rate 0.3 --seed 42` – works locally, output reviewed and accepted. VS Code: interpreter = project `.venv`. First file in S3: `raw/contracts/dt=2026-10-10/contracts.csv` (4504 B, uploaded by the generator with `--upload --bucket leasing-dbt-radeq-2026`). **Next step:** catch-up / `--backfill N` mode (generate all missing days up to today), then extend to `customers`, `installment_schedule`, `payments`.
 - **Session 6:** Moved to the Claude Code extension in VS Code. Git synced (local `main` = `origin/main` after PR #3), branch `feature/generator-backfill`. Done: pure function `missing_days()` in `generator/days.py` (written by me, spec = docstring + `tests/test_days.py`, 10 pytest tests – first tests in the project), `pytest` as a dev dependency – **PR #4 merged**. Also: Python learning track started (`learning/python/`, local only; modules 1–2 done, drill 01 ready), web research on best practices → [docs/03-engineering-guidelines.md](docs/03-engineering-guidelines.md). **Next step:** wire `missing_days()` into the generator – list existing `dt=` partitions in S3 (boto3), add `--backfill N` / `--catch-up` to `generate.py`, then run a real 90-day backfill.
+- **Session 7 (2026-10-16):** PR #5 merged (engineering guidelines); local `main` synced, branch `feature/generator-catch-up`. Decided to start dbt early (see Decisions). Done: `parse_partition_day()` (pure, 9 pytest cases) and `list_existing_days()` (boto3 paginator) in `generator/storage.py`; `--catch-up`, `--backfill N`, `--dry-run` in `generate.py` (days planned per table via `missing_days()`, per-day seed `seed + day.toordinal()`, a failing day stops only its own table). Real run: 90 daily partitions of `contracts` in S3 (2026-07-19 .. 2026-10-16); a second run says "up to date" (idempotent). Daily use: `uv run python -m generator.generate --table contracts --catch-up --upload --bucket leasing-dbt-radeq-2026`. **Next step:** Stage 2 on `contracts` – `dbt init`, `dbt debug`, DuckDB reads from S3, source + staging model, first tests.
