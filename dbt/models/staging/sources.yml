@@ -9,9 +9,13 @@ sources:
       # {name} is replaced by the table name below. Every column is read as text
       # (all_varchar): types are cast in staging, so one dirty value never breaks the read.
       # The bucket name comes from the S3_BUCKET environment variable (default = our bucket).
+      # The CSV dialect (delim, quote, escape) is set explicitly on purpose: when reading many
+      # files DuckDB guesses the dialect from a sample, and a wrong guess silently splits quoted
+      # values that contain a comma (e.g. "12,5O") and shifts the whole row by one column.
       external_location: >-
         read_csv('s3://{{ env_var("S3_BUCKET", "leasing-dbt-radeq-2026") }}/raw/{name}/*/*.csv',
-        header = true, all_varchar = true, hive_partitioning = true)
+        header = true, all_varchar = true, hive_partitioning = true,
+        delim = ',', quote = '"', escape = '"')
     tables:
       - name: contracts
         description: One row per lease contract signed on business day dt (flat extract, dirty on purpose).

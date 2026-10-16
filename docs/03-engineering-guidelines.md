@@ -54,13 +54,14 @@ We target **pandas 3.x** (released January 2026; requires Python ≥ 3.11).
 
 ### Reliability
 - **Idempotency:** re-running a job for the same day gives the same result. We **overwrite the whole partition** (same key, deterministic seed), never blindly append. ✅ generator; ⬜ keep it true for dbt incremental models (use `merge` / `delete+insert`, not plain `append`).
-- **Backfill and catch-up** as first-class modes. ⬜ in progress (`missing_days()`).
+- **Backfill and catch-up** as first-class modes. ✅ `--catch-up`, `--backfill N`, `--dry-run` (plan first, then run).
 - **Retries with backoff** for transient errors (boto3 retries S3 calls by default; orchestrator retries for whole steps).
 - **Design for failure:** decide per failure whether to retry, skip and log, alert or halt; report via exit codes. ✅ exit code 0/1.
 
 ### Data quality and contracts
 - **Data contract at the boundary:** column names, types, nullability, allowed values. ✅ [docs/02-data-contract.md](02-data-contract.md).
 - **Validate on ingestion and again before serving** (dbt tests in staging and marts). ⬜ Stage 2–3.
+- **Never let the reader guess the file format.** Set CSV `delim`, `quote`, `escape`, `header` and column types explicitly. Auto-detection samples a few files and applies the result to all of them; when the guess is wrong the failure is *silent*. ✅ Real case: reading 90 daily files with a glob, DuckDB guessed "no quote character", split the quoted value `"12,5O"` into two fields and shifted the rest of that row by one column (`status` held a region name). No error was raised; only an `accepted_values` test on `status` exposed it. Fix: explicit dialect in `sources.yml`.
 - **Quarantine, don't drop:** invalid rows go to a `__rejected` table with the reason. ✅ designed in the contract.
 - **Test keys for nulls and uniqueness** – the highest-value tests. ⬜ Stage 2.
 - **Track quality over time:** row counts vs. a baseline, null and duplicate rates. ⬜ later.
