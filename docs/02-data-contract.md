@@ -3,7 +3,7 @@
 This document defines what the generator writes to the raw layer and how dbt must treat it.
 It is the single source of truth for column names, types, mandatory fields and data-quality rules.
 
-Status: **draft v1 – `contracts` table**. Other tables (`customers`, `installment_schedule`, `payments`) will be added as they are built.
+Status: **draft v1 – `contracts` and `customers` tables**. Other tables (`installment_schedule`, `payments`) will be added as they are built.
 
 ---
 
@@ -83,7 +83,73 @@ Business decides which transactions go into reports. The column comes from a leg
 
 ---
 
-## 3. Dirty data injected by the generator
+## 3. Table `customers`
+
+One row = one customer registered on business day `dt`.
+
+### Incremental extract
+
+The extract is **incremental**: the file of day `dt` contains **only the customers registered that day**
+(`registration_date` = `dt`), never a full copy of the customer base. With a realistic base of hundreds of
+thousands of customers, re-writing everything every day would be wasteful; downstream, dbt appends only the new
+rows (incremental model, Stage 4).
+
+- The project's **go-live date** is `2026-07-19` (first day of data). On that day an initial batch of
+  `INITIAL_CUSTOMERS = 150` customers is registered; every following day `NEW_CUSTOMERS_PER_DAY = 3` new ones.
+- Customer numbers are sequential in registration order and deterministic: day *k* after go-live (k ≥ 1) registers
+  numbers `150 + 3*(k-1) + 1` … `150 + 3*k`. So `customer_id` is unique across the whole history.
+
+| column | type (after staging) | mandatory | allowed values / format | notes |
+|---|---|---|---|---|
+| `customer_id` | text | ✅ | `CU-NNNNN` | business key, must be unique across all days |
+| `customer_type` | text | ✅ | `company`, `sole_trader`, `individual` | case-insensitive in raw |
+| `customer_name` | text | ✅ | free text | company name or full name (synthetic, Faker) |
+| `industry` | text | ✅ | `transport`, `construction`, `manufacturing`, `retail`, `healthcare`, `it_services`, `agriculture`, `private` | case-insensitive in raw; `private` for individuals |
+| `region` | text | ✅ | Polish voivodeship name | same list as `contracts.delivery_region` |
+| `city` | text | ❌ | | |
+| `customer_email` | text | ❌ | valid e-mail format | same value as in `contracts`; invalid format → warn |
+| `registration_date` | date | ✅ | `YYYY-MM-DD`, ≤ `dt` | later than `dt` → rejected |
+
+Row-level rules follow the general rules of section 1 (blank mandatory → rejected, `<unknown>` in mandatory text →
+`unknown`, non-parsable date → rejected, duplicates of `customer_id` → quarantine `duplicate_customer_id`).
+
+### Dirty data injected by the generator (`customers`)
+
+| issue | example | expected handling |
+|---|---|---|
+| blank mandatory field | `customer_type = ''` | rejected, test `error` |
+| `<unknown>` in mandatory text | `industry = '<unknown>'` | valid → `unknown` |
+| inconsistent casing / whitespace | `' TRANSPORT'`, `Company` | normalized in staging, valid |
+| invalid e-mail | `jan.kowalski@` | kept, test `warn` |
+| duplicate `customer_id` | same id twice | quarantine `duplicate_customer_id`, test `unique` → `error` |
+| future `registration_date` | `registration_date > dt` | rejected, test `error` |
+| **duplicate e-mail** across different customers | two `customer_id`s with the same `customer_email` | **flagged, not rejected** (see below) |
+
+### Duplicate e-mails (possible duplicate customers)
+
+The same e-mail under two different `customer_id`s often means one customer registered twice, but a shared company
+mailbox is also possible, so the row is **kept**. Because the second customer may register on a later day, this can
+only be detected on the **combined table of all days** (`stg_customers`), never in a single daily file.
+
+- Staging adds a boolean column `has_duplicate_email` (true when the same non-blank e-mail, compared case-insensitively
+  and trimmed, belongs to more than one `customer_id`). Blank e-mails never count as duplicates.
+- A dbt test on `customer_email` (`unique` over non-null values, severity `warn`) reports how many there are.
+- Business decides later what to do with the flagged rows (e.g. merge in a customer dimension); the pipeline never drops them.
+- The generator injects the issue by giving a small share of new customers the e-mail of an already registered one.
+
+---
+
+## 4. Cross-table rules
+
+| rule | clean data | dirty data / handling |
+|---|---|---|
+| every `contracts.customer_id` exists in `customers` | always true | a small share of contracts get an **orphan** `customer_id` (no such customer) → dbt test `relationships` → `error`. Orphans are excluded from facts and listed in a quarantine model in the intermediate layer (Stage 3) |
+| a contract is signed **on or after** the customer's `registration_date` | always true: the generator picks customers only among those already registered on `signed_date` | not injected |
+| `customer_type` and `customer_email` in `contracts` equal those in `customers` (the contract extract repeats them) | always true (same profile source) | singular test (Stage 3), severity `warn` |
+
+---
+
+## 5. Dirty data injected by the generator (`contracts`)
 
 The generator injects these issues with a configurable probability (`--dirty-rate`) so the dbt layer has something to catch.
 
@@ -100,5 +166,6 @@ The generator injects these issues with a configurable probability (`--dirty-rat
 | inconsistent casing / whitespace | `' Active'`, `CAR` | normalized in staging, valid |
 | invalid e-mail | `jan.kowalski@` | kept, test `warn` |
 | invalid `INCLUDE_IN_STATS` | `yes`, `1` | rejected, test `error` |
+| orphan `customer_id` | `CU-09999` (no such customer) | kept in staging; test `relationships` → `error`; excluded later (section 4) |
 
 All data is synthetic. E-mails use reserved example domains (`example.com`, `example.pl`), addresses are generated by Faker (`pl_PL`).
