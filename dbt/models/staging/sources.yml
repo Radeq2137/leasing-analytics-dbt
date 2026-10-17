@@ -17,5 +17,9 @@ sources:
         header = true, all_varchar = true, hive_partitioning = true,
         delim = ',', quote = '"', escape = '"')
     tables:
+      - name: customers
+        description: >
+          Customers registered on business day dt (incremental extract: each day holds only that day's
+          new customers, dirty on purpose).
       - name: contracts
         description: One row per lease contract signed on business day dt (flat extract, dirty on purpose).
